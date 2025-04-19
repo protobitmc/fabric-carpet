@@ -38,17 +38,25 @@ import net.minecraft.core.Holder;
 import net.minecraft.core.HolderSet;
 import net.minecraft.core.QuartPos;
 import net.minecraft.core.Registry;
+import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.particles.ParticleOptions;
+import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.DistanceManager;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.Ticket;
 import net.minecraft.server.level.TicketType;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.tags.TagKey;
+import net.minecraft.world.level.ServerExplosion;
 import net.minecraft.world.level.chunk.ChunkGenerator;
 import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.DensityFunctions;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
@@ -56,6 +64,7 @@ import net.minecraft.world.level.levelgen.NoiseRouter;
 import net.minecraft.world.level.levelgen.RandomState;
 import net.minecraft.world.level.levelgen.structure.Structure;
 import net.minecraft.world.level.levelgen.structure.StructureType;
+import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.apache.commons.lang3.tuple.Pair;
 
 import java.util.ArrayList;
@@ -92,12 +101,10 @@ import net.minecraft.world.entity.ai.village.poi.PoiRecord;
 import net.minecraft.world.entity.ai.village.poi.PoiType;
 import net.minecraft.world.entity.item.FallingBlockEntity;
 import net.minecraft.world.item.BlockItem;
-import net.minecraft.world.item.DiggerItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.ShearsItem;
-import net.minecraft.world.item.SwordItem;
 import net.minecraft.world.item.TridentItem;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.item.enchantment.Enchantments;
@@ -118,7 +125,6 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.StateDefinition;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.chunk.ChunkAccess;
-import net.minecraft.world.level.chunk.ChunkStatus;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.WorldgenRandom;
@@ -143,9 +149,9 @@ public class WorldAccess
         DIRECTION_MAP.put("x", Direction.EAST);
     }
 
-    private static final Map<String, TicketType<?>> ticketTypes = Map.of(
+    private static final Map<String, TicketType> ticketTypes = Map.of(
             "portal", TicketType.PORTAL,
-            "teleport", TicketType.POST_TELEPORT,
+            "teleport", TicketType.ENDER_PEARL,
             "unknown", TicketType.UNKNOWN
     );
     // dummy entity for dummy requirements in the loot tables (see snowball)
@@ -397,7 +403,7 @@ public class WorldAccess
             Registry<PoiType> poiReg = cc.registry(Registries.POINT_OF_INTEREST_TYPE);
             PoiType type = poiReg.getOptional(resource)
                     .orElseThrow(() -> new ThrowStatement(poiTypeString, Throwables.UNKNOWN_POI));
-            Holder<PoiType> holder = poiReg.getHolderOrThrow(ResourceKey.create(Registries.POINT_OF_INTEREST_TYPE, resource));
+            Holder<PoiType> holder = poiReg.getOrThrow(ResourceKey.create(Registries.POINT_OF_INTEREST_TYPE, resource));
 
             int occupancy = 0;
             if (locator.offset + 1 < lv.size())
@@ -633,14 +639,14 @@ public class WorldAccess
                 forceLoad = lv.get(blockArgument.offset).getBoolean();
             }
             ChunkAccess chunk = ((CarpetContext) c).level().getChunk(pos.getX() >> 4, pos.getZ() >> 4, ChunkStatus.EMPTY, forceLoad);
-            return chunk == null ? Value.NULL : ValueConversions.of(BuiltInRegistries.CHUNK_STATUS.getKey(chunk.getStatus()));
+            return chunk == null ? Value.NULL : ValueConversions.of(BuiltInRegistries.CHUNK_STATUS.getKey(chunk.getPersistedStatus()));
         });
 
         expression.addContextFunction("chunk_tickets", -1, (c, t, lv) ->
         {
             ServerLevel world = ((CarpetContext) c).level();
             DistanceManager foo = world.getChunkSource().chunkMap.getDistanceManager();
-            Long2ObjectOpenHashMap<SortedArraySet<Ticket<?>>> levelTickets = Vanilla.ChunkTicketManager_getTicketsByPosition(foo);
+            Long2ObjectOpenHashMap<List<Ticket>> levelTickets = Vanilla.ChunkTicketManager_getTicketsByPosition(foo);
 
             List<Value> res = new ArrayList<>();
             if (lv.isEmpty())
@@ -648,7 +654,7 @@ public class WorldAccess
                 for (long key : levelTickets.keySet())
                 {
                     ChunkPos chpos = new ChunkPos(key);
-                    for (Ticket<?> ticket : levelTickets.get(key))
+                    for (Ticket ticket : levelTickets.get(key))
                     {
                         res.add(ListValue.of(
                                 new StringValue(ticket.getType().toString()),
@@ -663,10 +669,10 @@ public class WorldAccess
             {
                 BlockArgument blockArgument = BlockArgument.findIn((CarpetContext) c, lv, 0);
                 BlockPos pos = blockArgument.block.getPos();
-                SortedArraySet<Ticket<?>> tickets = levelTickets.get(new ChunkPos(pos).toLong());
+                List<Ticket> tickets = levelTickets.get(new ChunkPos(pos).toLong());
                 if (tickets != null)
                 {
-                    for (Ticket<?> ticket : tickets)
+                    for (Ticket ticket : tickets)
                     {
                         res.add(ListValue.of(
                                 new StringValue(ticket.getType().toString()),
@@ -691,7 +697,7 @@ public class WorldAccess
         expression.addContextFunction("update", -1, (c, t, lv) ->
                 booleanStateTest(c, "update", lv, (s, p) ->
                 {
-                    ((CarpetContext) c).level().neighborChanged(p, s.getBlock(), p);
+                    ((CarpetContext) c).level().neighborChanged(p, s.getBlock(), null);
                     return true;
                 }));
 
@@ -813,8 +819,7 @@ public class WorldAccess
             Boolean[] result = new Boolean[]{true};
             cc.server().executeBlocking(() ->
             {
-                Clearable.tryClear(world.getBlockEntity(targetPos));
-                boolean success = world.setBlock(targetPos, finalSourceBlockState, 2);
+                boolean success = world.setBlock(targetPos, finalSourceBlockState, Block.UPDATE_CLIENTS  | Block.UPDATE_SKIP_BLOCK_ENTITY_SIDEEFFECTS );
                 if (finalData != null)
                 {
                     BlockEntity be = world.getBlockEntity(targetPos);
@@ -824,7 +829,7 @@ public class WorldAccess
                         destTag.putInt("x", targetPos.getX());
                         destTag.putInt("y", targetPos.getY());
                         destTag.putInt("z", targetPos.getZ());
-                        be.load(destTag);
+                        be.loadWithComponents(destTag, world.registryAccess());
                         be.setChanged();
                         success = true;
                     }
@@ -837,6 +842,7 @@ public class WorldAccess
         expression.addContextFunction("destroy", -1, (c, t, lv) ->
         {
             CarpetContext cc = (CarpetContext) c;
+            RegistryAccess regs = cc.registryAccess();
             ServerLevel world = cc.level();
             BlockArgument locator = BlockArgument.findIn(cc, lv, 0);
             BlockState state = locator.block.getBlockState();
@@ -879,11 +885,14 @@ public class WorldAccess
                             : NBTSerializableValue.parseStringOrFail(tagValue.getString()).getCompoundTag();
                 }
             }
-
-            ItemStack tool = new ItemStack(item, 1);
+            ItemStack tool;
             if (tag != null)
             {
-                tool.setTag(tag);
+                tool = ItemStack.CODEC.parse(regs.createSerializationContext(NbtOps.INSTANCE), tag).result().orElse(null);
+            }
+            else
+            {
+                tool = new ItemStack(item, 1);
             }
             if (playerBreak && state.getDestroySpeed(world, where) < 0.0)
             {
@@ -896,7 +905,7 @@ public class WorldAccess
             }
             world.levelEvent(null, 2001, where, Block.getId(state));
 
-            boolean toolBroke = false;
+            final MutableBoolean toolBroke = new MutableBoolean(false);
             boolean dropLoot = true;
             if (playerBreak)
             {
@@ -904,15 +913,16 @@ public class WorldAccess
                 //postMine() durability from item classes
                 float hardness = state.getDestroySpeed(world, where);
                 int damageAmount = 0;
-                if ((item instanceof DiggerItem && hardness > 0.0) || item instanceof ShearsItem)
+                if ((tool.is(ItemTags.PICKAXES) && hardness > 0.0) || item instanceof ShearsItem)
                 {
                     damageAmount = 1;
                 }
-                else if (item instanceof TridentItem || item instanceof SwordItem)
+                else if (item instanceof TridentItem || tool.is(ItemTags.SWORDS))
                 {
                     damageAmount = 2;
                 }
-                toolBroke = damageAmount > 0 && tool.hurt(damageAmount, world.getRandom(), null);
+                final int finalDamageAmount = damageAmount;
+                tool.hurtAndBreak(damageAmount, world, null, (i) ->  { if (finalDamageAmount > 0) toolBroke.setTrue(); } );
                 if (!isUsingEffectiveTool)
                 {
                     dropLoot = false;
@@ -921,7 +931,7 @@ public class WorldAccess
 
             if (dropLoot)
             {
-                if (how < 0 || (tag != null && EnchantmentHelper.getItemEnchantmentLevel(Enchantments.SILK_TOUCH, tool) > 0))
+                if (how < 0 || (tag != null && EnchantmentHelper.getItemEnchantmentLevel(world.registryAccess().lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.SILK_TOUCH), tool) > 0))
                 {
                     Block.popResource(world, where, new ItemStack(state.getBlock()));
                 }
@@ -929,7 +939,7 @@ public class WorldAccess
                 {
                     if (how > 0)
                     {
-                        tool.enchant(Enchantments.BLOCK_FORTUNE, (int) how);
+                        tool.enchant(world.registryAccess().lookupOrThrow(Registries.ENCHANTMENT).getOrThrow(Enchantments.FORTUNE), (int) how);
                     }
                     if (DUMMY_ENTITY == null)
                     {
@@ -942,12 +952,11 @@ public class WorldAccess
             {
                 return Value.TRUE;
             }
-            if (toolBroke)
+            if (toolBroke.booleanValue())
             {
                 return Value.NULL;
             }
-            Tag outtag = tool.getTag();
-            return outtag == null ? Value.TRUE : new NBTSerializableValue(() -> outtag);
+            return new NBTSerializableValue(() -> ItemStack.CODEC.encodeStart(regs.createSerializationContext(NbtOps.INSTANCE), tool).getOrThrow());
 
         });
 
@@ -1063,10 +1072,9 @@ public class WorldAccess
                 }
             }
             LivingEntity theAttacker = attacker;
-            float thePowah = powah;
 
             // copy of ServerWorld.createExplosion #TRACK#
-            Explosion explosion = new Explosion(cc.level(), source, null, null, pos.x, pos.y, pos.z, powah, createFire, mode)
+            ServerExplosion explosion = new ServerExplosion(cc.level(), source, null, null, pos, powah, createFire, mode)
             {
                 @Override
                 @Nullable
@@ -1077,15 +1085,11 @@ public class WorldAccess
                 }
             };
             explosion.explode();
-            explosion.finalizeExplosion(false);
-            if (mode == Explosion.BlockInteraction.KEEP)
-            {
-                explosion.clearToBlow();
-            }
+            ParticleOptions explosionParticle = explosion.isSmall() ? ParticleTypes.EXPLOSION : ParticleTypes.EXPLOSION_EMITTER;
             cc.level().players().forEach(spe -> {
                 if (spe.distanceToSqr(pos) < 4096.0D)
                 {
-                    spe.connection.send(new ClientboundExplodePacket(pos.x, pos.y, pos.z, thePowah, explosion.getToBlow(), explosion.getHitPlayers().get(spe)));
+                    spe.connection.send(new ClientboundExplodePacket(pos, Optional.ofNullable(explosion.getHitPlayers().get(spe)), explosionParticle, SoundEvents.GENERIC_EXPLODE));
                 }
             });
             return Value.TRUE;
@@ -1101,7 +1105,7 @@ public class WorldAccess
             CarpetContext cc = (CarpetContext) c;
             String itemString = lv.get(0).getString();
             Vector3Argument locator = Vector3Argument.findIn(lv, 1);
-            ItemInput stackArg = NBTSerializableValue.parseItem(itemString, cc.registryAccess());
+            ItemStack stackArg = NBTSerializableValue.parseItem(itemString, cc.registryAccess());
             BlockPos where = BlockPos.containing(locator.vec);
             // Paintings throw an exception if their direction is vertical, therefore we change the default here
             String facing = lv.size() > locator.offset
@@ -1113,15 +1117,7 @@ public class WorldAccess
                 sneakPlace = lv.get(locator.offset + 1).getBoolean();
             }
 
-            BlockValue.PlacementContext ctx;
-            try
-            {
-                ctx = BlockValue.PlacementContext.from(cc.level(), where, facing, sneakPlace, stackArg.createItemStack(1, false));
-            }
-            catch (CommandSyntaxException e)
-            {
-                throw new InternalExpressionException(e.getMessage());
-            }
+            BlockValue.PlacementContext ctx = BlockValue.PlacementContext.from(cc.level(), where, facing, sneakPlace, stackArg);
 
             if (!(stackArg.getItem() instanceof final BlockItem blockItem))
             {
@@ -1155,7 +1151,7 @@ public class WorldAccess
 
         expression.addContextFunction("blocks_movement", -1, (c, t, lv) ->
                 booleanStateTest(c, "blocks_movement", lv, (s, p) ->
-                        !s.isPathfindable(((CarpetContext) c).level(), p, PathComputationType.LAND)));
+                        !s.isPathfindable(PathComputationType.LAND)));
 
         expression.addContextFunction("block_sound", -1, (c, t, lv) ->
                 stateStringQuery(c, "block_sound", lv, (s, p) ->
@@ -1225,10 +1221,10 @@ public class WorldAccess
             Registry<Block> blocks = cc.registry(Registries.BLOCK);
             if (lv.isEmpty())
             {
-                return ListValue.wrap(blocks.holders().map(blockReference -> ValueConversions.of(blockReference.key().location())));
+                return ListValue.wrap(blocks.listElements().map(blockReference -> ValueConversions.of(blockReference.key().location())));
             }
             ResourceLocation tag = InputValidator.identifierOf(lv.get(0).getString());
-            Optional<HolderSet.Named<Block>> tagset = blocks.getTag(TagKey.create(Registries.BLOCK, tag));
+            Optional<HolderSet.Named<Block>> tagset = blocks.get(TagKey.create(Registries.BLOCK, tag));
             return tagset.isEmpty() ? Value.NULL : ListValue.wrap(tagset.get().stream().map(b -> ValueConversions.of(blocks.getKey(b.value()))));
         });
 
@@ -1238,16 +1234,16 @@ public class WorldAccess
             Registry<Block> blocks = cc.registry(Registries.BLOCK);
             if (lv.isEmpty())
             {
-                return ListValue.wrap(blocks.getTagNames().map(ValueConversions::of));
+                return ListValue.wrap(blocks.getTags().map(ValueConversions::of));
             }
             BlockArgument blockLocator = BlockArgument.findIn(cc, lv, 0, true);
             if (blockLocator.offset == lv.size())
             {
                 Block target = blockLocator.block.getBlockState().getBlock();
-                return ListValue.wrap(blocks.getTags().filter(e -> e.getSecond().stream().anyMatch(h -> (h.value() == target))).map(e -> ValueConversions.of(e.getFirst())));
+                return ListValue.wrap(blocks.getTags().filter(e -> e.stream().anyMatch(h -> (h.value() == target))).map(ValueConversions::of));
             }
             String tag = lv.get(blockLocator.offset).getString();
-            Optional<HolderSet.Named<Block>> tagSet = blocks.getTag(TagKey.create(Registries.BLOCK, InputValidator.identifierOf(tag)));
+            Optional<HolderSet.Named<Block>> tagSet = blocks.get(TagKey.create(Registries.BLOCK, InputValidator.identifierOf(tag)));
             return tagSet.isEmpty() ? Value.NULL : BooleanValue.of(blockLocator.block.getBlockState().is(tagSet.get()));
         });
 
@@ -1256,7 +1252,7 @@ public class WorldAccess
             ServerLevel world = cc.level();
             if (lv.isEmpty())
             {
-                return ListValue.wrap(cc.registry(Registries.BIOME).holders().map(biomeReference -> ValueConversions.of(biomeReference.key().location())));
+                return ListValue.wrap(cc.registry(Registries.BIOME).listElements().map(biomeReference -> ValueConversions.of(biomeReference.key().location())));
             }
 
             Biome biome;
@@ -1301,7 +1297,7 @@ public class WorldAccess
 
             if (locator.replacement != null)
             {
-                biome = world.registryAccess().registryOrThrow(Registries.BIOME).get(InputValidator.identifierOf(locator.replacement));
+                biome = world.registryAccess().lookupOrThrow(Registries.BIOME).getValue(InputValidator.identifierOf(locator.replacement));
                 if (biome == null)
                 {
                     throw new ThrowStatement(locator.replacement, Throwables.UNKNOWN_BIOME);
@@ -1336,7 +1332,7 @@ public class WorldAccess
             }
             String biomeName = lv.get(locator.offset).getString();
             // from locatebiome command code
-            Holder<Biome> biome = cc.registry(Registries.BIOME).getHolder(ResourceKey.create(Registries.BIOME, InputValidator.identifierOf(biomeName)))
+            Holder<Biome> biome = cc.registry(Registries.BIOME).get(ResourceKey.create(Registries.BIOME, InputValidator.identifierOf(biomeName)))
                     .orElseThrow(() -> new ThrowStatement(biomeName, Throwables.UNKNOWN_BIOME));
             boolean doImmediateUpdate = true;
             if (lv.size() > locator.offset + 1)
@@ -1351,7 +1347,7 @@ public class WorldAccess
             int biomeZ = QuartPos.fromBlock(pos.getZ());
             try
             {
-                int i = QuartPos.fromBlock(chunk.getMinBuildHeight());
+                int i = QuartPos.fromBlock(chunk.getMinY());
                 int j = i + QuartPos.fromBlock(chunk.getHeight()) - 1;
                 int k = Mth.clamp(biomeY, i, j);
                 int l = chunk.getSectionIndex(QuartPos.toBlock(k));
@@ -1366,7 +1362,7 @@ public class WorldAccess
             {
                 WorldTools.forceChunkUpdate(pos, world);
             }
-            chunk.setUnsaved(true);
+            chunk.markUnsaved();
             return Value.TRUE;
         });
 
@@ -1393,7 +1389,7 @@ public class WorldAccess
                 );
             }
             String simpleStructureName = lv.get(locator.offset).getString().toLowerCase(Locale.ROOT);
-            Structure structureName = reg.get(InputValidator.identifierOf(simpleStructureName));
+            Structure structureName = reg.getValue(InputValidator.identifierOf(simpleStructureName));
             if (structureName == null)
             {
                 return Value.NULL;
@@ -1431,7 +1427,7 @@ public class WorldAccess
                 {
                     String reqString = requested.getString();
                     ResourceLocation id = InputValidator.identifierOf(reqString);
-                    Structure requestedStructure = reg.get(id);
+                    Structure requestedStructure = reg.getValue(id);
                     if (requestedStructure != null)
                     {
                         singleOutput = true;
@@ -1439,7 +1435,7 @@ public class WorldAccess
                     }
                     else
                     {
-                        StructureType<?> sss = cc.registry(Registries.STRUCTURE_TYPE).get(id);
+                        StructureType<?> sss = cc.registry(Registries.STRUCTURE_TYPE).getValue(id);
                         reg.entrySet().stream().filter(e -> e.getValue().type() == sss).forEach(e -> structure.add(e.getValue()));
                     }
                     if (structure.isEmpty())
@@ -1518,7 +1514,7 @@ public class WorldAccess
                 return MapValue.wrap(structureList);
             }
             String structureName = lv.get(locator.offset).getString().toLowerCase(Locale.ROOT);
-            return ValueConversions.of(structures.get(reg.get(InputValidator.identifierOf(structureName))), cc.registryAccess());
+            return ValueConversions.of(structures.get(reg.getValue(InputValidator.identifierOf(structureName))), cc.registryAccess());
         });
 
         expression.addContextFunction("set_structure", -1, (c, t, lv) ->
@@ -1585,6 +1581,8 @@ public class WorldAccess
         // todo maybe enable chunk blending?
         expression.addContextFunction("reset_chunk", -1, (c, t, lv) ->
         {
+            return Value.NULL;
+            /*
             CarpetContext cc = (CarpetContext) c;
             List<ChunkPos> requestedChunks = new ArrayList<>();
             if (lv.size() == 1)
@@ -1642,6 +1640,8 @@ public class WorldAccess
                 )));
             });
             return result[0];
+
+             */
         });
 
         expression.addContextFunction("inhabited_time", -1, (c, t, lv) ->
@@ -1677,7 +1677,7 @@ public class WorldAccess
                 throw new InternalExpressionException("'add_chunk_ticket' requires block position, ticket type and radius");
             }
             String type = lv.get(locator.offset).getString();
-            TicketType<?> ticket = ticketTypes.get(type.toLowerCase(Locale.ROOT));
+            TicketType ticket = ticketTypes.get(type.toLowerCase(Locale.ROOT));
             if (ticket == null)
             {
                 throw new InternalExpressionException("Unknown ticket type: " + type);
@@ -1691,15 +1691,15 @@ public class WorldAccess
             ChunkPos target = new ChunkPos(pos);
             if (ticket == TicketType.PORTAL) // portal
             {
-                cc.level().getChunkSource().addRegionTicket(TicketType.PORTAL, target, radius, pos);
+                cc.level().getChunkSource().addTicketWithRadius(TicketType.PORTAL, target, radius);
             }
-            else if (ticket == TicketType.POST_TELEPORT) // post teleport
+            else if (ticket == TicketType.ENDER_PEARL) // post teleport
             {
-                cc.level().getChunkSource().addRegionTicket(TicketType.POST_TELEPORT, target, radius, 1);
+                cc.level().getChunkSource().addTicketWithRadius(TicketType.ENDER_PEARL, target, radius);
             }
             else
             {
-                cc.level().getChunkSource().addRegionTicket(TicketType.UNKNOWN, target, radius, target);
+                cc.level().getChunkSource().addTicketWithRadius(TicketType.UNKNOWN, target, radius);
             }
             return new NumericValue(ticket.timeout());
         });
@@ -1758,7 +1758,7 @@ public class WorldAccess
 
         if (generator instanceof final NoiseBasedChunkGenerator noiseBasedChunkGenerator)
         {
-            Registry<DensityFunction> densityFunctionRegistry = level.registryAccess().registryOrThrow(Registries.DENSITY_FUNCTION);
+            Registry<DensityFunction> densityFunctionRegistry = level.registryAccess().lookupOrThrow(Registries.DENSITY_FUNCTION);
             NoiseRouter router = noiseBasedChunkGenerator.generatorSettings().value().noiseRouter();
             DensityFunction densityFunction = switch (densityFunctionQuery)
                     {
@@ -1778,7 +1778,7 @@ public class WorldAccess
                         case "vein_ridged" -> router.veinRidged();
                         case "vein_gap" -> router.veinGap();
                         default -> {
-                            DensityFunction result = densityFunctionRegistry.get(InputValidator.identifierOf(densityFunctionQuery));
+                            DensityFunction result = densityFunctionRegistry.getValue(InputValidator.identifierOf(densityFunctionQuery));
                             if (result == null)
                             {
                                 throw new InternalExpressionException("Density function '" + densityFunctionQuery + "' is not defined in the registies.");

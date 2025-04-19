@@ -16,6 +16,7 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
+import net.minecraft.SharedConstants;
 import net.minecraft.commands.CommandBuildContext;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.arguments.DimensionArgument;
@@ -189,6 +190,11 @@ public class PlayerCommand
         MinecraftServer server = context.getSource().getServer();
         PlayerList manager = server.getPlayerList();
 
+        if (EntityPlayerMPFake.isSpawningPlayer(playerName))
+        {
+            Messenger.m(context.getSource(), "r Player ", "rb " + playerName, "r  is currently logging on");
+            return true;
+        }
         if (manager.getPlayerByName(playerName) != null)
         {
             Messenger.m(context.getSource(), "r Player ", "rb " + playerName, "r  is already logged on");
@@ -222,7 +228,8 @@ public class PlayerCommand
     private static int kill(CommandContext<CommandSourceStack> context)
     {
         if (cantReMove(context)) return 0;
-        getPlayer(context).kill();
+        ServerPlayer player = getPlayer(context);
+        player.kill(player.serverLevel());
         return 1;
     }
 
@@ -304,7 +311,7 @@ public class PlayerCommand
 
     private static int maxNameLength(MinecraftServer server)
     {
-        return server.getPort() >= 0 ? Player.MAX_NAME_LENGTH : 40;
+        return server.getPort() >= 0 ? SharedConstants.MAX_PLAYER_NAME_LENGTH : 40;
     }
 
     private static int manipulate(CommandContext<CommandSourceStack> context, Consumer<EntityPlayerActionPack> action)

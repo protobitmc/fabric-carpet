@@ -31,7 +31,7 @@ public class ServerNetworkHandler
     private static final Set<ServerPlayer> validCarpetPlayers = new HashSet<>();
 
     private static final Map<String, BiConsumer<ServerPlayer, Tag>> dataHandlers = Map.of(
-            CarpetClient.HELLO, (p, t) -> onHello(p, t.getAsString()),
+            CarpetClient.HELLO, (p, t) -> onHello(p, t.asString().orElseThrow()),
             "clientCommand", (p, t) -> handleClientCommand(p, (CompoundTag) t)
     );
 
@@ -79,10 +79,11 @@ public class ServerNetworkHandler
 
     private static void handleClientCommand(ServerPlayer player, CompoundTag commandData)
     {
-        String command = commandData.getString("command");
-        String id = commandData.getString("id");
+        String command = commandData.getString("command").orElseThrow();
+        String id = commandData.getString("id").orElseThrow();
         List<Component> output = new ArrayList<>();
         Component[] error = {null};
+        int[] returnValue = {0};
         if (player.getServer() == null)
         {
             error[0] = Component.literal("No Server");
@@ -90,7 +91,7 @@ public class ServerNetworkHandler
         else
         {
             player.getServer().getCommands().performPrefixedCommand(
-                    new SnoopyCommandSource(player, error, output), command
+                    new SnoopyCommandSource(player, error, output, returnValue), command
             );
         }
         CompoundTag result = new CompoundTag();
@@ -99,10 +100,11 @@ public class ServerNetworkHandler
         {
             result.putString("error", error[0].getContents().toString());
         }
+        result.putInt("return", returnValue[0]);
         ListTag outputResult = new ListTag();
         for (Component line : output)
         {
-            outputResult.add(StringTag.valueOf(Component.Serializer.toJson(line)));
+            outputResult.add(StringTag.valueOf(Component.Serializer.toJson(line, player.registryAccess())));
         }
         if (!output.isEmpty())
         {
@@ -114,7 +116,7 @@ public class ServerNetworkHandler
 
     public static void onClientData(ServerPlayer player, CompoundTag compound)
     {
-        for (String key : compound.getAllKeys())
+        for (String key : compound.keySet())
         {
             if (dataHandlers.containsKey(key))
             {

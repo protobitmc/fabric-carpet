@@ -9,8 +9,8 @@ import carpet.settings.Rule;
 import carpet.utils.Translations;
 import carpet.utils.CommandHelper;
 import carpet.utils.Messenger;
-import carpet.utils.SpawnChunks;
 import net.fabricmc.loader.api.FabricLoader;
+import net.fabricmc.loader.api.SemanticVersion;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.resources.ResourceLocation;
@@ -49,7 +49,10 @@ import static carpet.api.settings.RuleCategory.CLIENT;
 public class CarpetSettings
 {
     public static final String carpetVersion = FabricLoader.getInstance().getModContainer("carpet").orElseThrow().getMetadata().getVersion().toString();
-    public static final String releaseTarget = "1.20.3";
+    public static final int [] releaseTarget =  {
+            ((SemanticVersion)FabricLoader.getInstance().getModContainer("minecraft").orElseThrow().getMetadata().getVersion()).getVersionComponent(1),
+            ((SemanticVersion)FabricLoader.getInstance().getModContainer("minecraft").orElseThrow().getMetadata().getVersion()).getVersionComponent(2)
+    };
     public static final Logger LOG = LoggerFactory.getLogger("carpet");
     public static final ThreadLocal<Boolean> skipGenerationChecks = ThreadLocal.withInitial(() -> false);
     public static final ThreadLocal<Boolean> impendingFillSkipUpdates = ThreadLocal.withInitial(() -> false);
@@ -70,7 +73,7 @@ public class CarpetSettings
     @Rule(
             desc = "Sets the language for Carpet",
             category = FEATURE,
-            options = {"en_us", "fr_fr", "pt_br", "zh_cn", "zh_tw"},
+            options = {"en_us", "fr_fr", "es_ar","pt_br", "zh_cn", "zh_tw"},
             strict = true, // the current system doesn't handle fallbacks and other, not defined languages would make unreadable mess. Change later
             validate = LanguageValidator.class
     )
@@ -319,7 +322,7 @@ public class CarpetSettings
             int minRange = 0;
             int maxRange = 1;
 
-            if (source == null) {
+            if (source == null || !source.getServer().isReady()) {
                 maxRange = Integer.MAX_VALUE;
             } else {
                 for (Level level : source.getServer().getAllLevels()) {
@@ -770,37 +773,6 @@ public class CarpetSettings
     )
     public static int simulationDistance = 0;
 
-    public static class ChangeSpawnChunksValidator extends Validator<Integer> {
-        @Override public Integer validate(CommandSourceStack source, CarpetRule<Integer> currentRule, Integer newValue, String string) {
-            if (source == null) return newValue;
-            if (newValue < 0 || newValue > 32)
-            {
-                Messenger.m(source, "r spawn chunk size has to be between 0 and 32");
-                return null;
-            }
-            if (currentRule.value().intValue() == newValue.intValue())
-            {
-                //must been some startup thing
-                return newValue;
-            }
-            ServerLevel currentOverworld = source.getServer().overworld();
-            if (currentOverworld != null)
-            {
-                SpawnChunks.changeSpawnSize(currentOverworld, newValue);
-            }
-            return newValue;
-        }
-    }
-    @Rule(
-            desc = "Changes size of spawn chunks",
-            extra = {"Defines new radius", "setting it to 0 - disables spawn chunks"},
-            category = CREATIVE,
-            strict = false,
-            options = {"0", "11"},
-            validate = ChangeSpawnChunksValidator.class
-    )
-    public static int spawnChunksSize = MinecraftServer.START_CHUNK_RADIUS;
-
     public enum RenewableCoralMode {
         FALSE,
         EXPANDED,
@@ -936,7 +908,7 @@ public class CarpetSettings
         @Override
         public String validate(CommandSourceStack source, CarpetRule<String> currentRule, String newValue, String string) {
             if (source == null) return newValue; // closing or sync
-            Optional<Block> ignoredBlock = source.registryAccess().registryOrThrow(Registries.BLOCK).getOptional(ResourceLocation.tryParse(newValue));
+            Optional<Block> ignoredBlock = source.registryAccess().lookupOrThrow(Registries.BLOCK).getOptional(ResourceLocation.tryParse(newValue));
             if (!ignoredBlock.isPresent()) {
                 Messenger.m(source, "r Unknown block '" + newValue + "'.");
                 return null;

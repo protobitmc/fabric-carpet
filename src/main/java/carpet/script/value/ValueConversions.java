@@ -8,16 +8,17 @@ import carpet.script.utils.Colors;
 import it.unimi.dsi.fastutil.ints.Int2ObjectMap;
 import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
 import net.minecraft.advancements.critereon.MinMaxBounds;
-import net.minecraft.commands.arguments.item.ItemInput;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.GlobalPos;
+import net.minecraft.core.HolderSet;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.Vec3i;
 import net.minecraft.core.particles.ParticleOptions;
-import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.NbtOps;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
@@ -30,6 +31,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.ai.behavior.PositionTracker;
 import net.minecraft.world.entity.ai.memory.NearestVisibleLivingEntities;
 import net.minecraft.world.entity.ai.memory.WalkTarget;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
@@ -45,6 +47,7 @@ import net.minecraft.world.level.pathfinder.Path;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.scores.Objective;
+import net.minecraft.world.scores.ScoreHolder;
 import net.minecraft.world.scores.criteria.ObjectiveCriteria;
 
 import java.util.ArrayList;
@@ -56,8 +59,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
 import java.util.stream.StreamSupport;
-
-import com.mojang.brigadier.exceptions.CommandSyntaxException;
 
 import javax.annotation.Nullable;
 
@@ -96,23 +97,18 @@ public class ValueConversions
         );
     }
 
-    @Deprecated
-    public static Value of(ItemStack stack)
-    {
-        return stack == null || stack.isEmpty() ? Value.NULL : ListValue.of(
-                of(BuiltInRegistries.ITEM.getKey(stack.getItem())),
-                new NumericValue(stack.getCount()),
-                NBTSerializableValue.fromStack(stack)
-        );
-    }
-
     public static Value of(ItemStack stack, RegistryAccess regs)
     {
         return stack == null || stack.isEmpty() ? Value.NULL : ListValue.of(
-                of(regs.registryOrThrow(Registries.ITEM).getKey(stack.getItem())),
+                of(stack.getItem(), regs),
                 new NumericValue(stack.getCount()),
-                NBTSerializableValue.fromStack(stack)
+                NBTSerializableValue.fromStack(stack, regs)
         );
+    }
+
+    public static Value of(Item item, RegistryAccess regs)
+    {
+        return of(regs.lookupOrThrow(Registries.ITEM).getKey(item));
     }
 
     public static Value of(Objective objective)
@@ -133,9 +129,9 @@ public class ValueConversions
     }
 
 
-    public static Value of(ParticleOptions particle)
+    public static Value of(ParticleOptions particle, RegistryAccess regs)
     {
-        String repr = particle.writeToString();
+        String repr = ParticleTypes.CODEC.encodeStart(regs.createSerializationContext(NbtOps.INSTANCE), particle).toString();
         return StringValue.of(repr.startsWith("minecraft:") ? repr.substring(10) : repr);
     }
 
@@ -170,7 +166,7 @@ public class ValueConversions
                 case "overworld", "over_world" -> server.getLevel(Level.OVERWORLD);
                 default -> {
                     ResourceKey<Level> dim = null;
-                    ResourceLocation id = new ResourceLocation(dimString);
+                    ResourceLocation id = ResourceLocation.parse(dimString);
                     // not using RegistryKey.of since that one creates on check
                     for (ResourceKey<Level> world : (server.levelKeys()))
                     {
@@ -198,6 +194,11 @@ public class ValueConversions
     public static Value of(TagKey<?> tagKey)
     {
         return of(tagKey.location());
+    }
+
+    public static Value of(HolderSet.Named<?> tagKey)
+    {
+        return of(tagKey.key().location());
     }
 
     public static Value of(@Nullable ResourceLocation id)
@@ -373,7 +374,7 @@ public class ValueConversions
             if (box.maxX() >= box.minX() && box.maxY() >= box.minY() && box.maxZ() >= box.minZ())
             {
                 pieces.add(ListValue.of(
-                        NBTSerializableValue.nameFromRegistryId(regs.registryOrThrow(Registries.STRUCTURE_PIECE).getKey(piece.getType())),
+                        NBTSerializableValue.nameFromRegistryId(regs.lookupOrThrow(Registries.STRUCTURE_PIECE).getKey(piece.getType())),
                         (piece.getOrientation() == null) ? Value.NULL : new StringValue(piece.getOrientation().getName()),
                         ListValue.fromTriple(box.minX(), box.minY(), box.minZ()),
                         ListValue.fromTriple(box.maxX(), box.maxY(), box.maxZ())
@@ -382,6 +383,11 @@ public class ValueConversions
         }
         ret.put(new StringValue("pieces"), ListValue.wrap(pieces));
         return MapValue.wrap(ret);
+    }
+
+    public static Value of(final ScoreHolder scoreHolder)
+    {
+        return FormattedTextValue.of(scoreHolder.getFeedbackDisplayName());
     }
 
     public static Value fromProperty(BlockState state, Property<?> p)
@@ -457,10 +463,10 @@ public class ValueConversions
     public static Value ofBlockPredicate(RegistryAccess registryAccess, Predicate<BlockInWorld> blockPredicate)
     {
         Vanilla.BlockPredicatePayload payload = Vanilla.BlockPredicatePayload.of(blockPredicate);
-        Registry<Block> blocks = registryAccess.registryOrThrow(Registries.BLOCK);
+        Registry<Block> blocks = registryAccess.lookupOrThrow(Registries.BLOCK);
         return ListValue.of(
                 payload.state() == null ? Value.NULL : of(blocks.getKey(payload.state().getBlock())),
-                payload.tagKey() == null ? Value.NULL : of(blocks.getTag(payload.tagKey()).get().key()),
+                payload.tagKey() == null ? Value.NULL : of(blocks.get(payload.tagKey()).get().key()),
                 MapValue.wrap(payload.properties()),
                 payload.tag() == null ? Value.NULL : new NBTSerializableValue(payload.tag())
         );
@@ -497,22 +503,9 @@ public class ValueConversions
         {
             name = value.getString();
         }
-        ItemInput itemInput = NBTSerializableValue.parseItem(name, nbtTag, regs);
-        try
-        {
-            return itemInput.createItemStack(count, false);
-        }
-        catch (CommandSyntaxException cse)
-        {
-            if (!withCount)
-            {
-                throw new IllegalStateException("Unexpected exception while creating item stack of " + name + ". All items should be able to stack to one", cse);
-            }
-            else
-            {
-                throw new ThrowStatement(count + " stack size of " + name, Throwables.UNKNOWN_ITEM);
-            }
-        }
+        ItemStack itemInput = NBTSerializableValue.parseItem(name, nbtTag, regs);
+        itemInput.setCount(count);
+        return itemInput;
     }
 
     public static Value guess(ServerLevel serverWorld, Object o)
