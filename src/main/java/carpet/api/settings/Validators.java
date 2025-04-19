@@ -34,12 +34,17 @@ public final class Validators {
             {
                 return null;
             }
-            if (FabricAPIHooks.PERMISSIONS_API) {
-                Messenger.m(source, "g Note that you can use your permission manager mod to control access to commands");
-            }
             return newValue;
         }
         @Override public String description() { return "Can be limited to 'ops' only, true/false for everyone/no one, or a custom permission level";}
+        @Override
+        public void notifyFailure(CommandSourceStack source, CarpetRule<String> currentRule, String providedValue) {
+            super.notifyFailure(source, currentRule, providedValue);
+
+            if (FabricAPIHooks.PERMISSIONS_API) {
+                Messenger.m(source, "g Note that you can use your permission manager mod to control access to commands");
+            }
+        }
     }
     
     /**
